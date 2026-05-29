@@ -66,6 +66,8 @@
   <button id="redoBtn">Redo</button>
   <button id="clearBtn">Clear</button>
   <button id="saveBtn">Save as SVG</button>
+  <button id="loadBtn">Load SVG</button>
+  <input type="file" id="fileInput" accept=".svg" style="display: none;">
   <button id="toggleDark">Toggle Night Mode</button>
 </div>
 
@@ -103,6 +105,8 @@ const undoBtn = document.getElementById('undoBtn');
 const redoBtn = document.getElementById('redoBtn');
 const clearBtn = document.getElementById('clearBtn');
 const saveBtn = document.getElementById('saveBtn');
+const loadBtn = document.getElementById('loadBtn');
+const fileInput = document.getElementById('fileInput');
 const toggleDark = document.getElementById('toggleDark');
 
 let symmetry = parseInt(symmetrySlider.value);
@@ -361,6 +365,98 @@ saveBtn.onclick = () => {
   link.click();
   URL.revokeObjectURL(url);
 };
+
+loadBtn.onclick = () => {
+  fileInput.click();
+};
+
+fileInput.onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    const svgContent = event.target.result;
+    parseSVG(svgContent);
+  };
+  reader.readAsText(file);
+  e.target.value = ''; // Reset input so same file can be loaded again
+};
+
+function parseSVG(svgContent) {
+  // Create a temporary DOM element to parse the SVG
+  const parser = new DOMParser();
+  const svgDoc = parser.parseFromString(svgContent, "image/svg+xml");
+  
+  // Get all path elements from the SVG
+  const paths = svgDoc.querySelectorAll('path');
+  
+  if (paths.length === 0) {
+    alert('No paths found in the SVG file.');
+    return;
+  }
+
+  // Get SVG dimensions from viewBox or width/height attributes
+  const svgEl = svgDoc.querySelector('svg');
+  let svgWidth = width;
+  let svgHeight = height;
+  let viewBox = svgEl.getAttribute('viewBox');
+  
+  if (viewBox) {
+    const vbParts = viewBox.split(/[\s,]+/).filter(Boolean).map(parseFloat);
+    if (vbParts.length >= 4) {
+      svgWidth = vbParts[2];
+      svgHeight = vbParts[3];
+    }
+  } else {
+    svgWidth = parseFloat(svgEl.getAttribute('width')) || width;
+    svgHeight = parseFloat(svgEl.getAttribute('height')) || height;
+  }
+  
+  const svgCenterX = svgWidth / 2;
+  const svgCenterY = svgHeight / 2;
+
+  // Clear current strokes
+  strokes = [];
+  currentStroke = [];
+  undoneStrokes = [];
+
+  // Parse each path and convert to strokes
+  paths.forEach(path => {
+    const d = path.getAttribute('d');
+    if (!d) return;
+
+    const points = parseSVGPath(d);
+    if (points.length > 1) {
+      // Convert absolute coordinates back to relative (centered at 0,0)
+      const centeredPoints = points.map(p => ({
+        x: p.x - svgCenterX,
+        y: p.y - svgCenterY
+      }));
+      strokes.push(centeredPoints);
+    }
+  });
+
+  redraw();
+}
+
+function parseSVGPath(d) {
+  // Simple parser that extracts all numbers from the path
+  const points = [];
+  const numbers = d.match(/[-+]?\d*\.?\d+/g) || [];
+  
+  // Group numbers into pairs (x, y)
+  for (let i = 0; i < numbers.length; i += 2) {
+    if (i + 1 < numbers.length) {
+      points.push({
+        x: parseFloat(numbers[i]),
+        y: parseFloat(numbers[i + 1])
+      });
+    }
+  }
+  
+  return points;
+}
 
 toggleDark.onclick = () => {
   document.body.classList.toggle('dark');
