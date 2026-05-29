@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mandala Creator Enhanced</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      height: 100%;
+      background: #f0f0f0;
+    }
+    body.dark {
+      background: #111;
+      color: #eee;
+    }
+    canvas {
+      display: block;
+      cursor: crosshair;
+    }
+    .controls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(255,255,255,0.95);
+      padding: 12px;
+      border-radius: 10px;
+      font-family: sans-serif;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+      z-index: 10;
+    }
+    body.dark .controls {
+      background: rgba(30,30,30,0.95);
+      color: #eee;
+    }
+    .controls label, .controls input, .controls button, .controls select {
+      margin: 5px 0;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+<canvas id="mandalaCanvas"></canvas>
+<div class="controls">
+  <label>Symmetry lines: <span id="symmetryValue">12</span></label>
+  <input type="range" id="symmetry" min="2" max="36" value="12">
+  <label><input type="checkbox" id="showGuides" checked> Show Symmetry Lines</label>
+
+
+  <label>Simplification: <span id="simplifyValue">5</span></label>
+  <input type="range" id="simplifySlider" min="0" max="20" value="5">
+
+  <label>Smoothing: <span id="smoothingValue">0.6</span></label>
+  <input type="range" id="smoothingSlider" min="0" max="1" step="0.05" value="0.6">
+
+  <label>Symmetry Type:</label>
+  <select id="symmetryType">
+    <option value="rotational">Rotational</option>
+    <option value="mirror">Mirror</option>
+    <option value="bilateral">Bilateral</option>
+  </select>
+
+  <button id="undoBtn">Undo</button>
+  <button id="redoBtn">Redo</button>
+  <button id="clearBtn">Clear</button>
+  <button id="saveBtn">Save as SVG</button>
+  <button id="toggleDark">Toggle Night Mode</button>
+</div>
+
+<script>
+const canvas = document.getElementById('mandalaCanvas');
+const ctx = canvas.getContext('2d');
+let width = window.innerWidth;
+let height = window.innerHeight;
+canvas.width = width;
+canvas.height = height;
+
+let showGuides = true;
+
+let centerX = width / 2;
+let centerY = height / 2;
+let drawing = false;
+let currentStroke = [];
+let strokes = [];
+let undoneStrokes = [];
+
+let zoom = 1;
+let offsetX = 0;
+let offsetY = 0;
+let isPanning = false;
+let panStart = {};
+
+const symmetrySlider = document.getElementById('symmetry');
+const symmetryValue = document.getElementById('symmetryValue');
+const simplifySlider = document.getElementById('simplifySlider');
+const simplifyValue = document.getElementById('simplifyValue');
+const smoothingSlider = document.getElementById('smoothingSlider');
+const smoothingValue = document.getElementById('smoothingValue');
+const symmetryTypeSelect = document.getElementById('symmetryType');
+const undoBtn = document.getElementById('undoBtn');
+const redoBtn = document.getElementById('redoBtn');
+const clearBtn = document.getElementById('clearBtn');
+const saveBtn = document.getElementById('saveBtn');
+const toggleDark = document.getElementById('toggleDark');
+
+let symmetry = parseInt(symmetrySlider.value);
+let simplifyTolerance = parseFloat(simplifySlider.value);
+let smoothingStrength = parseFloat(smoothingSlider.value);
+let symmetryType = symmetryTypeSelect.value;
+
+const showGuidesCheckbox = document.getElementById('showGuides');
+showGuidesCheckbox.onchange = () => {
+  showGuides = showGuidesCheckbox.checked;
+  redraw();
+};
+
+function getMousePos(e) {
+  return {
+    x: (e.clientX - offsetX - centerX) / zoom,
+    y: (e.clientY - offsetY - centerY) / zoom
+  };
+}
+
+function rotatePoint(p, angle) {
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return {
+    x: p.x * cos - p.y * sin,
+    y: p.x * sin + p.y * cos
+  };
+}
+
+function drawSymmetryGuides() {
+  if (!showGuides) return;
+
+  ctx.save();
+  ctx.strokeStyle = document.body.classList.contains('dark') ? 'rgba(200,200,200,0.2)' : 'rgba(0,0,0,0.2)';
+  ctx.lineWidth = 1;
+  ctx.translate(centerX + offsetX, centerY + offsetY);
+  ctx.scale(zoom, zoom);
+
+  const radius = Math.min(width, height);
+  const angleStep = (2 * Math.PI) / symmetry;
+
+  ctx.rotate(angleStep / 2); // evenly distribute lines
+
+  for (let i = 0; i < symmetry; i++) {
+    const angle = angleStep * i;
+    const x = Math.cos(angle) * radius;
+    const y = Math.sin(angle) * radius;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+
+
+function rdpSimplify(points, epsilon) {
+  if (points.length < 3) return points;
+
+  const sqrDist = (p1, p2) => (p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2;
+  const getPerpDist = (pt, lineStart, lineEnd) => {
+    const dx = lineEnd.x - lineStart.x;
+    const dy = lineEnd.y - lineStart.y;
+    const mag = dx * dx + dy * dy;
+    let u = ((pt.x - lineStart.x) * dx + (pt.y - lineStart.y) * dy) / mag;
+    u = Math.max(0, Math.min(1, u));
+    const closest = { x: lineStart.x + u * dx, y: lineStart.y + u * dy };
+    return Math.sqrt(sqrDist(pt, closest));
+  };
+
+  const rdp = (pts, epsilon) => {
+    let dmax = 0;
+    let index = 0;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const d = getPerpDist(pts[i], pts[0], pts[pts.length - 1]);
+      if (d > dmax) {
+        index = i;
+        dmax = d;
+      }
+    }
+
+    if (dmax > epsilon) {
+      const left = rdp(pts.slice(0, index + 1), epsilon);
+      const right = rdp(pts.slice(index), epsilon);
+      return left.slice(0, -1).concat(right);
+    } else {
+      return [pts[0], pts[pts.length - 1]];
+    }
+  };
+
+  return rdp(points, epsilon);
+}
+
+function drawSmoothPath(points) {
+  if (points.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length - 1; i++) {
+    const xc = (points[i].x + points[i + 1].x) / 2;
+    const yc = (points[i].y + points[i + 1].y) / 2;
+    ctx.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
+  }
+  ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+  ctx.stroke();
+}
+
+function applySymmetry(stroke) {
+  const variants = [];
+  const angleStep = (2 * Math.PI) / symmetry;
+
+  for (let i = 0; i < symmetry; i++) {
+    const angle = angleStep * i;
+
+    // Rotate stroke
+    const rotated = stroke.map(p => rotatePoint(p, angle));
+    variants.push(rotated);
+
+    if (symmetryType === 'mirror') {
+      // Mirror *before* rotation across x-axis, then rotate
+      const mirrored = stroke.map(p => ({ x: p.x, y: -p.y }))
+                             .map(p => rotatePoint(p, angle));
+      variants.push(mirrored);
+    }
+
+    if (symmetryType === 'bilateral') {
+      // Horizontal mirror (flip x), then rotate
+      const mirroredH = stroke.map(p => ({ x: -p.x, y: p.y }))
+                              .map(p => rotatePoint(p, angle));
+      variants.push(mirroredH);
+
+      // Vertical mirror (flip y), then rotate
+      const mirroredV = stroke.map(p => ({ x: p.x, y: -p.y }))
+                              .map(p => rotatePoint(p, angle));
+      variants.push(mirroredV);
+    }
+  }
+
+  return variants;
+}
+
+function redraw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawSymmetryGuides();
+  ctx.save();
+  ctx.translate(centerX + offsetX, centerY + offsetY);
+  ctx.scale(zoom, zoom);
+  ctx.strokeStyle = document.body.classList.contains('dark') ? '#fff' : '#000';
+  ctx.lineWidth = 1;
+
+  [...strokes, currentStroke].forEach(stroke => {
+    if (stroke.length < 2) return;
+    const simplified = rdpSimplify(stroke, simplifyTolerance);
+    let paths = applySymmetry(simplified);
+    paths.forEach(p => drawSmoothPath(p));
+  });
+  ctx.restore();
+}
+
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 1) {
+    isPanning = true;
+    panStart = {x: e.clientX, y: e.clientY};
+    return;
+  }
+  drawing = true;
+  currentStroke = [getMousePos(e)];
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (isPanning) {
+    offsetX += e.clientX - panStart.x;
+    offsetY += e.clientY - panStart.y;
+    panStart = {x: e.clientX, y: e.clientY};
+    redraw();
+    return;
+  }
+  if (!drawing) return;
+  currentStroke.push(getMousePos(e));
+  redraw();
+});
+
+canvas.addEventListener('mouseup', e => {
+  if (e.button === 1) {
+    isPanning = false;
+    return;
+  }
+  if (currentStroke.length > 1) {
+    strokes.push(currentStroke);
+    undoneStrokes = [];
+  }
+  drawing = false;
+  currentStroke = [];
+  redraw();
+});
+
+canvas.addEventListener('wheel', e => {
+  const zoomFactor = 1.1;
+  if (e.deltaY < 0) zoom *= zoomFactor;
+  else zoom /= zoomFactor;
+  redraw();
+});
+
+undoBtn.onclick = () => {
+  if (strokes.length > 0) undoneStrokes.push(strokes.pop());
+  redraw();
+};
+
+redoBtn.onclick = () => {
+  if (undoneStrokes.length > 0) strokes.push(undoneStrokes.pop());
+  redraw();
+};
+
+clearBtn.onclick = () => {
+  strokes = [];
+  currentStroke = [];
+  undoneStrokes = [];
+  redraw();
+};
+
+saveBtn.onclick = () => {
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", height);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+
+  strokes.forEach(stroke => {
+    if (stroke.length < 2) return;
+    const simplified = rdpSimplify(stroke, simplifyTolerance);
+    const paths = applySymmetry(simplified);
+    paths.forEach(path => {
+      let d = `M ${path[0].x + centerX} ${path[0].y + centerY}`;
+      for (let i = 1; i < path.length - 1; i++) {
+        const xc = (path[i].x + path[i + 1].x) / 2 + centerX;
+        const yc = (path[i].y + path[i + 1].y) / 2 + centerY;
+        d += ` Q ${path[i].x + centerX} ${path[i].y + centerY}, ${xc} ${yc}`;
+      }
+      d += ` L ${path[path.length - 1].x + centerX} ${path[path.length - 1].y + centerY}`;
+
+      const pathEl = document.createElementNS(svgNS, "path");
+      pathEl.setAttribute("d", d);
+      pathEl.setAttribute("fill", "none");
+      pathEl.setAttribute("stroke", "black");
+      pathEl.setAttribute("stroke-width", "1");
+      svg.appendChild(pathEl);
+    });
+  });
+
+  const svgBlob = new Blob([svg.outerHTML], {type: 'image/svg+xml'});
+  const url = URL.createObjectURL(svgBlob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "mandala.svg";
+  link.click();
+  URL.revokeObjectURL(url);
+};
+
+toggleDark.onclick = () => {
+  document.body.classList.toggle('dark');
+  redraw();
+};
+
+symmetrySlider.oninput = () => {
+  symmetry = parseInt(symmetrySlider.value);
+  symmetryValue.textContent = symmetry;
+  redraw();
+};
+
+simplifySlider.oninput = () => {
+  simplifyTolerance = parseFloat(simplifySlider.value);
+  simplifyValue.textContent = simplifyTolerance;
+  redraw();
+};
+
+smoothingSlider.oninput = () => {
+  smoothingStrength = parseFloat(smoothingSlider.value);
+  smoothingValue.textContent = smoothingStrength.toFixed(2);
+  redraw();
+};
+
+symmetryTypeSelect.onchange = () => {
+  symmetryType = symmetryTypeSelect.value;
+  redraw();
+};
+
+window.addEventListener('resize', () => {
+  width = window.innerWidth;
+  height = window.innerHeight;
+  canvas.width = width;
+  canvas.height = height;
+  centerX = width / 2;
+  centerY = height / 2;
+  redraw();
+});
+
+redraw();
+</script>
+</body>
+</html>
