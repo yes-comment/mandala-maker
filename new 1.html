@@ -447,14 +447,16 @@ function drawLoadedSVG() {
     const points = parseSVGPath(d);
     if (points.length < 2) return;
     
-    // Convert from loaded SVG coordinates to our coordinate system
+    // The SVG coordinates are already in absolute canvas coordinates
+    // (from when they were saved with centerX/centerY added)
+    // Convert to relative coordinates by subtracting the SVG's center
     const centeredPoints = points.map(p => ({
-      x: p.x - loadedCenterX + centerX,
-      y: p.y - loadedCenterY + centerY
+      x: p.x - loadedCenterX,
+      y: p.y - loadedCenterY
     }));
     
     ctx.save();
-    ctx.translate(offsetX, offsetY);
+    ctx.translate(centerX + offsetX, centerY + offsetY);
     ctx.scale(zoom, zoom);
     ctx.strokeStyle = document.body.classList.contains('dark') ? '#fff' : '#000';
     ctx.lineWidth = 1;
