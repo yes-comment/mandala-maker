@@ -335,6 +335,23 @@ saveBtn.onclick = () => {
   svg.setAttribute("height", height);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
 
+  // Store original stroke data as JSON in metadata for perfect round-trip
+  const strokeData = {
+    version: 2,
+    strokes: strokes.map(stroke => stroke.map(p => ({x: p.x, y: p.y}))),
+    settings: {
+      symmetry: symmetry,
+      symmetryType: symmetryType,
+      simplifyTolerance: simplifyTolerance,
+      smoothingStrength: smoothingStrength
+    }
+  };
+  
+  const metadata = document.createElementNS(svgNS, "metadata");
+  metadata.setAttribute("id", "mandala-strokes");
+  metadata.textContent = JSON.stringify(strokeData);
+  svg.appendChild(metadata);
+
   strokes.forEach(stroke => {
     if (stroke.length < 2) return;
     const simplified = rdpSimplify(stroke, simplifyTolerance);
@@ -388,7 +405,49 @@ function parseSVG(svgContent) {
   const parser = new DOMParser();
   const svgDoc = parser.parseFromString(svgContent, "image/svg+xml");
   
-  // Get all path elements from the SVG
+  // First, try to load from metadata (new format with perfect round-trip)
+  const metadata = svgDoc.querySelector('metadata#mandala-strokes');
+  if (metadata && metadata.textContent) {
+    try {
+      const strokeData = JSON.parse(metadata.textContent);
+      
+      // Clear current strokes
+      strokes = [];
+      currentStroke = [];
+      undoneStrokes = [];
+      
+      // Load strokes directly from metadata
+      if (strokeData.strokes) {
+        strokes = strokeData.strokes.map(stroke => 
+          stroke.map(p => ({x: p.x, y: p.y}))
+        );
+      }
+      
+      // Restore settings if available
+      if (strokeData.settings) {
+        symmetry = strokeData.settings.symmetry || symmetry;
+        symmetryType = strokeData.settings.symmetryType || symmetryType;
+        simplifyTolerance = strokeData.settings.simplifyTolerance || simplifyTolerance;
+        smoothingStrength = strokeData.settings.smoothingStrength || smoothingStrength;
+        
+        // Update UI to reflect loaded settings
+        symmetrySlider.value = symmetry;
+        symmetryValue.textContent = symmetry;
+        simplifySlider.value = simplifyTolerance;
+        simplifyValue.textContent = simplifyTolerance;
+        smoothingSlider.value = smoothingStrength;
+        smoothingValue.textContent = smoothingStrength.toFixed(2);
+        symmetryTypeSelect.value = symmetryType;
+      }
+      
+      redraw();
+      return;
+    } catch (error) {
+      console.error('Failed to parse metadata, falling back to path parsing:', error);
+    }
+  }
+
+  // Fallback: parse from path elements (for old SVGs or external SVGs)
   const paths = svgDoc.querySelectorAll('path');
   
   if (paths.length === 0) {
@@ -422,40 +481,95 @@ function parseSVG(svgContent) {
   undoneStrokes = [];
 
   // Parse each path and convert to strokes
+  // For old SVGs, each path represents one symmetry variant
+  // We will collect all unique strokes and avoid duplicates
+  const seenStrokes = new Set();
+  
   paths.forEach(path => {
     const d = path.getAttribute('d');
     if (!d) return;
-
-    const points = parseSVGPath(d);
-    if (points.length > 1) {
-      // Convert absolute coordinates back to relative (centered at 0,0)
-      const centeredPoints = points.map(p => ({
-        x: p.x - svgCenterX,
-        y: p.y - svgCenterY
-      }));
-      strokes.push(centeredPoints);
+    
+    // Parse the path and convert to relative coordinates
+    const strokePoints = parseSVGPathToStroke(d, svgCenterX, svgCenterY);
+    if (strokePoints && strokePoints.length > 1) {
+      // Create a hash to detect duplicate strokes from symmetry
+      const strokeHash = strokePoints.map(p => p.x.toFixed(2) + ',' + p.y.toFixed(2)).join('|');
+      if (!seenStrokes.has(strokeHash)) {
+        seenStrokes.add(strokeHash);
+        strokes.push(strokePoints);
+      }
     }
   });
 
   redraw();
 }
 
-function parseSVGPath(d) {
-  // Simple parser that extracts all numbers from the path
-  const points = [];
-  const numbers = d.match(/[-+]?\d*\.?\d+/g) || [];
+function parseSVGPathToStroke(d, centerX, centerY) {
+  // Parse SVG path and convert to stroke points (relative to center)
+  // This properly handles quadratic bezier curves to preserve smoothness
   
-  // Group numbers into pairs (x, y)
-  for (let i = 0; i < numbers.length; i += 2) {
-    if (i + 1 < numbers.length) {
-      points.push({
-        x: parseFloat(numbers[i]),
-        y: parseFloat(numbers[i + 1])
-      });
+  const points = [];
+  
+  // Tokenize the path: split by commands but keep the commands
+  const tokens = d.split(/([A-Za-z])/).filter(Boolean);
+  
+  let currentX = 0, currentY = 0;
+  let startX = 0, startY = 0;
+  
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i].trim();
+    
+    if (/^[A-Za-z]$/.test(token)) {
+      // This is a command
+      const cmd = token;
+      
+      if (cmd === 'M' || cmd === 'L') {
+        // Move or Line to - expect pairs of coordinates
+        let j = i + 1;
+        while (j < tokens.length && /^[\d\-\.\s,]+$/.test(tokens[j])) {
+          const coords = tokens[j].trim().split(/[,\s]+/).filter(Boolean).map(parseFloat);
+          if (coords.length >= 2) {
+            currentX = coords[0];
+            currentY = coords[1];
+            points.push({x: currentX - centerX, y: currentY - centerY});
+            if (cmd === 'M') {
+              startX = currentX;
+              startY = currentY;
+            }
+          }
+          j++;
+        }
+        i = j - 1;
+      } else if (cmd === 'Q') {
+        // Quadratic curve - expect groups of 4 numbers (cx, cy, ex, ey)
+        let j = i + 1;
+        while (j < tokens.length && /^[\d\-\.\s,]+$/.test(tokens[j])) {
+          const coords = tokens[j].trim().split(/[,\s]+/).filter(Boolean).map(parseFloat);
+          if (coords.length >= 4) {
+            const cx = coords[0], cy = coords[1];
+            const ex = coords[2], ey = coords[3];
+            
+            // For smooth curves, we need to preserve the control point
+            // Add the control point and end point
+            points.push({x: cx - centerX, y: cy - centerY});
+            points.push({x: ex - centerX, y: ey - centerY});
+            
+            currentX = ex;
+            currentY = ey;
+          }
+          j++;
+        }
+        i = j - 1;
+      } else if (cmd === 'Z' || cmd === 'z') {
+        // Close path
+        currentX = startX;
+        currentY = startY;
+        points.push({x: currentX - centerX, y: currentY - centerY});
+      }
     }
   }
   
-  return points;
+  return points.length > 0 ? points : null;
 }
 
 toggleDark.onclick = () => {
