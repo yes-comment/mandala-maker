@@ -417,30 +417,48 @@ function drawLoadedSVG() {
   // Create a temporary DOM element to parse and draw the SVG
   const parser = new DOMParser();
   const svgDoc = parser.parseFromString(loadedSVGContent, "image/svg+xml");
+  const svgEl = svgDoc.querySelector('svg');
   const paths = svgDoc.querySelectorAll('path');
+  
+  // Get the SVG dimensions to center the loaded content
+  let svgWidth = width;
+  let svgHeight = height;
+  let viewBox = svgEl.getAttribute('viewBox');
+  
+  if (viewBox) {
+    const vbParts = viewBox.split(/[\s,]+/).filter(Boolean).map(parseFloat);
+    if (vbParts.length >= 4) {
+      svgWidth = vbParts[2];
+      svgHeight = vbParts[3];
+    }
+  } else {
+    svgWidth = parseFloat(svgEl.getAttribute('width')) || width;
+    svgHeight = parseFloat(svgEl.getAttribute('height')) || height;
+  }
+  
+  const loadedCenterX = svgWidth / 2;
+  const loadedCenterY = svgHeight / 2;
   
   paths.forEach(path => {
     const d = path.getAttribute('d');
     if (!d) return;
     
-    // Draw the path directly on the canvas
-    const tempPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    tempPath.setAttribute("d", d);
-    tempPath.setAttribute("fill", "none");
-    tempPath.setAttribute("stroke", document.body.classList.contains('dark') ? '#fff' : '#000');
-    tempPath.setAttribute("stroke-width", "1");
-    
-    // For now, just draw the paths - we'll handle this differently
-    // Actually, let's just parse the path and draw it with our existing drawSmoothPath
+    // Parse the path and draw it with proper centering
     const points = parseSVGPath(d);
     if (points.length < 2) return;
     
+    // Convert from loaded SVG coordinates to our coordinate system
+    const centeredPoints = points.map(p => ({
+      x: p.x - loadedCenterX + centerX,
+      y: p.y - loadedCenterY + centerY
+    }));
+    
     ctx.save();
-    ctx.translate(centerX + offsetX, centerY + offsetY);
+    ctx.translate(offsetX, offsetY);
     ctx.scale(zoom, zoom);
     ctx.strokeStyle = document.body.classList.contains('dark') ? '#fff' : '#000';
     ctx.lineWidth = 1;
-    drawSmoothPath(points);
+    drawSmoothPath(centeredPoints);
     ctx.restore();
   });
 }
